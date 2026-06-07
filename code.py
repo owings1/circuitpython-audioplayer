@@ -22,7 +22,6 @@ from classes import *
 from utils import as_pin, settings
 
 STATE_FILENAME = const('_state')
-MNTCHK_FILENAME = const('_mountcheck')
 PARAMID_FRUIT = const(0x30)
 PARAMID_P2 = const(0x31)
 PARAMID_P3 = const(0x32)
@@ -116,7 +115,6 @@ class App:
       spi=self.spi,
       pin_cs=settings.sd_pin_cs,
       path=settings.sd_path,
-      mntchk_filename=MNTCHK_FILENAME,
       after_mount=self.after_mount,
       before_umount=self.before_umount,
       after_umount=self.after_umount)
@@ -187,22 +185,7 @@ class App:
       self.last_ctl_active_at = ticks_ms()
       self.ctldirty = True
     else:
-      if not self.sd.ensure_ready():
-        print('Cannot play audio: No SD card detected')
-        return
-      if not self.audio.playing and self.wav_files:
-        self.check_close()
-        # Pick a random filename from our clean list
-        filename = random.choice(self.wav_files)
-        fullpath = f'{settings.sd_path}/{filename}'
-        print(f'Opening: {filename}')
-        try:
-          self._fp = open(fullpath, 'rb')
-          self._wave = audiocore.WaveFile(self._fp)
-          print(f'Playing track...')
-          self.audio.play(self._wave)
-        except Exception as e:
-          print(f'Error playing {filename}: {e!r}')
+      self.play_random_wav_file()
 
   def check_close(self):
     if self._fp and not self.audio.playing:
@@ -313,10 +296,32 @@ class App:
     self.wav_files = [
       f for f in os.listdir(settings.sd_path)
       if f.lower().endswith('.wav') and not f.startswith('.') and not f.startswith('_')]
+    self.wav_files.sort()
     print('--- Reloaded WAV files from SD ---')
     for f in self.wav_files:
       print(f' - {f}')
     print(f'{len(self.wav_files)} tracks indexed')
+
+  def play_random_wav_file(self):
+    if not self.sd.ensure_ready():
+      print('Cannot play audio: No SD card detected')
+      return
+    if not self.wav_files:
+      print('No wav files available')
+      return
+    self.audio.stop()
+    self.check_close()
+    # Pick a random filename from our clean list
+    filename = random.choice(self.wav_files)
+    fullpath = f'{settings.sd_path}/{filename}'
+    print(f'Opening: {filename}')
+    try:
+      self._fp = open(fullpath, 'rb')
+      self._wave = audiocore.WaveFile(self._fp)
+      print(f'Playing track...')
+      self.audio.play(self._wave)
+    except Exception as e:
+      print(f'Error playing {filename}: {e!r}')
 
   def after_mount(self) -> None:
     self.reload_wav_files()

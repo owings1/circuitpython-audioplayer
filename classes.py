@@ -167,7 +167,7 @@ class SDHelper:
         pass
       return True
     except OSError:
-      print('SD Card check failed. Card was likely ejected.')
+      print('SD card not initialized')
       self.close()
     print('Attempting lazy SD card initialization...')
     try:
@@ -180,8 +180,7 @@ class SDHelper:
           pass
       except OSError:
         pass
-      # self.reload_wav_files()
-      print('SD Card mounted and indexed successfully')
+      print('SD Card mounted successfully')
       if self.after_mount:
         self.after_mount()
       return True
@@ -191,7 +190,6 @@ class SDHelper:
       return False
 
   def close(self) -> None:
-    # self.check_close()
     if self.before_umount:
       self.before_umount()
     try:
@@ -206,7 +204,6 @@ class SDHelper:
     self.sdcard = None
     if self.after_umount:
       self.after_umount()
-    # self.wav_files = None
 
 # Typing
 try:
