@@ -1,12 +1,18 @@
 from __future__ import annotations
 
-import fontio
-import terminalio
+import busio
 import displayio
+import fontio
+import sdcardio
+import storage
+import terminalio
 from busdisplay import BusDisplay
 from i2cdisplaybus import I2CDisplayBus
+from microcontroller import Pin
 
-__all__ = ('ConfigParam', 'OledDisplay',)
+from utils import as_pin
+
+__all__ = ('ConfigParam', 'OledDisplay', 'SDHelper')
 
 class ConfigParam:
   def __init__(
@@ -134,9 +140,77 @@ class OledDisplay:
       raise ValueError(f'Unsupported driver: {driver}')
     return Display
 
+class SDHelper:
+  def __init__(
+    self,
+    spi: busio.SPI,
+    pin_cs: Pin|str,
+    path: str = '/sd',
+    mntchk_filename: str = '_mountcheck',
+    after_mount: Callable[[], None]|None = None,
+    before_umount: Callable[[], None]|None = None,
+    after_umount: Callable[[], None]|None = None,
+  ) -> None:
+    self.spi = spi
+    self.pin_cs = as_pin(pin_cs)
+    self.path = path
+    self.mntchk_filename = mntchk_filename
+    self.after_mount = after_mount
+    self.before_umount = before_umount
+    self.after_umount = after_umount
+    self.sdcard = None
+
+  def ensure_ready(self) -> bool:
+    check_path = f'{self.path}/{self.mntchk_filename}'
+    try:
+      with open(check_path, 'rb'):
+        pass
+      return True
+    except OSError:
+      print('SD Card check failed. Card was likely ejected.')
+      self.close()
+    print('Attempting lazy SD card initialization...')
+    try:
+      self.close()
+      self.sdcard = sdcardio.SDCard(self.spi, self.pin_cs)
+      vfs = storage.VfsFat(self.sdcard)
+      storage.mount(vfs, self.path)
+      try:
+        with open(check_path, 'wb'):
+          pass
+      except OSError:
+        pass
+      # self.reload_wav_files()
+      print('SD Card mounted and indexed successfully')
+      if self.after_mount:
+        self.after_mount()
+      return True
+    except Exception as e:
+      print(f'SD Card connection offline or unreadable: {e!r}')
+      self.close()
+      return False
+
+  def close(self) -> None:
+    # self.check_close()
+    if self.before_umount:
+      self.before_umount()
+    try:
+      storage.umount(self.path)
+    except:
+      pass
+    if self.sdcard:
+      try:
+        self.sdcard.deinit()
+      except:
+        pass
+    self.sdcard = None
+    if self.after_umount:
+      self.after_umount()
+    # self.wav_files = None
+
 # Typing
 try:
   from adafruit_display_text.label import Label
-  from typing import Any, Sequence
+  from typing import Any, Callable, Sequence
 except ImportError:
   pass
