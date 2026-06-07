@@ -24,6 +24,7 @@ from classes import *
 from utils import as_pin, settings
 
 STATE_FILENAME = const('_state')
+MNTCHK_FILENAME = const('_mountcheck')
 PARAMID_FRUIT = const(0x30)
 PARAMID_P2 = const(0x31)
 PARAMID_P3 = const(0x32)
@@ -77,21 +78,7 @@ class App:
       bit_clock=as_pin(settings.audio_pin_bclk),
       word_select=as_pin(settings.audio_pin_lrc),
       data=as_pin(settings.audio_pin_din))
-    # Initialize the SD card
-    print('Initializing SD card...')
     self.spi = board.SPI()
-    self.sdcard = sdcardio.SDCard(self.spi, as_pin(settings.sd_pin_cs))
-    vfs = storage.VfsFat(self.sdcard)
-    storage.mount(vfs, settings.sd_path)
-    print('SD Card mounted successfully')
-    # List and filter only .wav files from the SD card directory
-    self.wav_files = [
-      f for f in os.listdir(settings.sd_path)
-      if f.lower().endswith('.wav') and not f.startswith('.')]
-    print('--- Found WAV files on SD card ---')
-    for f in self.wav_files:
-      print(f' - {f}')
-    print(f'{len(self.wav_files)} tracks loaded')
     if settings.oled_enabled:
       print(f'Initializing display...')
       from i2cdisplaybus import I2CDisplayBus
@@ -127,8 +114,9 @@ class App:
       self.paramsmap[PARAMID_FRUIT],
       self.paramsmap[PARAMID_P2],
       self.paramsmap[PARAMID_P3]]
-    self.load_saved_state()
-  
+    if self.ensure_sd_ready():
+      self.load_saved_state()
+
   def deinit(self) -> None:
     if self._button_pin:
       self._button_pin.deinit()
@@ -138,13 +126,12 @@ class App:
       self.oled.deinit()
     if self.audio:
       self.audio.deinit()
-    if self.sdcard:
-      self.sdcard.deinit()
     if self._fp:
       try:
         self._fp.close()
       except:
         pass
+    self.close_sd_hardware()
     displayio.release_displays()
     self.button = None
     self.ctlbtn = None
@@ -193,6 +180,9 @@ class App:
       self.last_ctl_active_at = ticks_ms()
       self.ctldirty = True
     else:
+      if not self.ensure_sd_ready():
+        print('Cannot play audio: No SD card detected')
+        return
       if not self.audio.playing and self.wav_files:
         self.check_close()
         # Pick a random filename from our clean list
@@ -311,6 +301,58 @@ class App:
         print(f'Loaded {param.name}={param.value}')
       else:
         print(f'Warning: ignored invalid {param.name} index {index}')
+
+  def reload_wav_files(self) -> None:
+    self.wav_files = [
+      f for f in os.listdir(settings.sd_path)
+      if f.lower().endswith('.wav') and not f.startswith('.') and not f.startswith('_')]
+    print('--- Reloaded WAV files from SD ---')
+    for f in self.wav_files:
+      print(f' - {f}')
+    print(f'{len(self.wav_files)} tracks indexed')
+
+  def close_sd_hardware(self) -> None:
+    self.check_close()
+    try:
+      storage.umount(settings.sd_path)
+    except:
+      pass
+    if self.sdcard:
+      try:
+        self.sdcard.deinit()
+      except:
+        pass
+    self.sdcard = None
+    self.wav_files = None
+    self.sd_ready = False
+
+  def ensure_sd_ready(self) -> bool:
+    check_path = f'{settings.sd_path}/{MNTCHK_FILENAME}'
+    try:
+      with open(check_path, 'rb'):
+        pass
+      return True
+    except OSError:
+      print('SD Card check failed. Card was likely ejected.')
+      self.close_sd_hardware()
+    print('Attempting lazy SD card initialization...')
+    try:
+      self.close_sd_hardware()
+      self.sdcard = sdcardio.SDCard(self.spi, as_pin(settings.sd_pin_cs))
+      vfs = storage.VfsFat(self.sdcard)
+      storage.mount(vfs, settings.sd_path)
+      try:
+        with open(check_path, 'wb'):
+          pass
+      except OSError:
+        pass
+      self.reload_wav_files()
+      print('SD Card mounted and indexed successfully')
+      return True
+    except Exception as e:
+      print(f'SD Card connection offline or unreadable: {e!r}')
+      self.close_sd_hardware()
+      return False
 
 app = App()
 
