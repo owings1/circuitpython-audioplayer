@@ -11,15 +11,21 @@ __all__ = ('ConfigParam', 'OledDisplay',)
 class ConfigParam:
   def __init__(
     self,
+    id: int,
     name: str,
     choices: Sequence,
     selected: int = 0,
+    title: str|None = None,
   ) -> None:
     if not choices:
       raise ValueError(f'Empty choices for {name}')
+    if len(choices) > 0x100:
+      raise ValueError(f'Too many choices for {name}')
+    self.id = id
     self.name = name
     self.choices = choices
     self.selected = selected
+    self.title = title or name
     self.value
 
   @property

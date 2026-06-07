@@ -13,9 +13,20 @@ import random
 import time
 from adafruit_debouncer import Button
 from adafruit_ticks import ticks_ms, ticks_diff
+from micropython import const
+
+try:
+  from typing import Iterable
+except ImportError:
+  pass
 
 from classes import *
 from utils import as_pin, settings
+
+STATE_FILENAME = const('_state')
+PARAMID_FRUIT = const(0x30)
+PARAMID_P2 = const(0x31)
+PARAMID_P3 = const(0x32)
 
 class App:
   audio: audiobusio.I2SOut|None = None
@@ -27,7 +38,9 @@ class App:
   oled: OledDisplay|None = None
   wav_files: list[str]|None = None
   ctlmode: bool = False
-  params: list[ConfigParam]|None = []
+  ctldirty: bool = False
+  params: list[ConfigParam]|None = None
+  paramsmap: dict[int, ConfigParam]|None = None
   param_selected: int|None = None
   last_ctl_active_at: int|None = None
   _fp = None
@@ -67,7 +80,7 @@ class App:
     # Initialize the SD card
     print('Initializing SD card...')
     self.spi = board.SPI()
-    self.sdcard = sdcardio.SDCard(self.spi, board.D3)
+    self.sdcard = sdcardio.SDCard(self.spi, as_pin(settings.sd_pin_cs))
     vfs = storage.VfsFat(self.sdcard)
     storage.mount(vfs, settings.sd_path)
     print('SD Card mounted successfully')
@@ -96,16 +109,25 @@ class App:
           x_offset=settings.oled_x_offset)
       except Exception as e:
         print(f'Failed to initialize display: {e!r}')
-    self.params = [
-      ConfigParam(
+    self.paramsmap = {
+      PARAMID_FRUIT: ConfigParam(
+        id=PARAMID_FRUIT,
         name='fruit',
+        title='Fruit',
         choices=('apple', 'banana', 'cherry')),
-      ConfigParam(
+      PARAMID_P2: ConfigParam(
+        id=PARAMID_P2,
         name='p2',
         choices=range(1, 33)),
-      ConfigParam(
+      PARAMID_P3: ConfigParam(
+        id=PARAMID_P3,
         name='p3',
-        choices=range(8))]
+        choices=range(8))}
+    self.params = [
+      self.paramsmap[PARAMID_FRUIT],
+      self.paramsmap[PARAMID_P2],
+      self.paramsmap[PARAMID_P3]]
+    self.load_saved_state()
   
   def deinit(self) -> None:
     if self._button_pin:
@@ -131,7 +153,9 @@ class App:
     self.sdcard = None
     self.wav_files = None
     self.ctlmode = False
+    self.ctldirty = False
     self.params = None
+    self.paramsmap = None
     self.param_selected = None
     self.last_ctl_active_at = None
     self._wave = None
@@ -167,6 +191,7 @@ class App:
       param.adjust(count)
       self.draw_display()
       self.last_ctl_active_at = ticks_ms()
+      self.ctldirty = True
     else:
       if not self.audio.playing and self.wav_files:
         self.check_close()
@@ -212,14 +237,17 @@ class App:
     print('Entering Control Mode')
     self.param_selected = 0
     self.ctlmode = True
+    self.ctldirty = False
     self.draw_display()
     self.last_ctl_active_at = ticks_ms()
 
   def ctlmode_exit(self) -> None:
-    print('Exiting Control Mode')
+    print(f'Exiting Control Mode')
     self.param_selected = None
     self.ctlmode = False
     self.last_ctl_active_at = None
+    if self.ctldirty:
+      self.save_state()
     if self.oled:
       self.oled.sleep()
 
@@ -233,6 +261,56 @@ class App:
     self.oled.header = param.name
     self.oled.body = str(param.value)
     self.oled.wake()
+
+  def load_saved_state(self) -> None:
+    filepath = f'{settings.sd_path}/{STATE_FILENAME}'
+    def bytegen():
+      try:
+        with open(filepath, 'rb') as fp:
+          while True:
+            byte = fp.read(1)
+            if not byte:
+              break
+            yield byte[0]
+      except OSError:
+        print(f'No saved state file found at {filepath}')
+        return
+    self.load_state(bytegen())
+
+  def save_state(self) -> None:
+    filepath = f'{settings.sd_path}/{STATE_FILENAME}'
+    tmppath = f'{filepath}.tmp'
+    print('Saving configuration state...')
+    try:
+      with open(tmppath, 'wb') as fp:
+        for param in self.params:
+          fp.write(bytes([param.id, param.selected]))
+      os.rename(tmppath, filepath)
+      print('State saved successfully')
+    except Exception as e:
+      print(f'Error saving state: {e!r}')
+      try:
+        os.remove(tmppath)
+      except OSError:
+        pass
+
+  def load_state(self, buf: Iterable[int]) -> None:
+    it = iter(buf)
+    for paramid in it:
+      try:
+        index = next(it)
+      except StopIteration:
+        break
+      try:
+        param = self.paramsmap[paramid]
+      except KeyError:
+        print(f'Ignored unknown param ID {paramid}')
+        continue
+      if index < len(param.choices):
+        param.selected = index
+        print(f'Loaded {param.name}={param.value}')
+      else:
+        print(f'Warning: ignored invalid {param.name} index {index}')
 
 app = App()
 
