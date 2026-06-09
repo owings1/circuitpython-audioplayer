@@ -14,12 +14,13 @@ from adafruit_ticks import ticks_ms, ticks_diff
 from micropython import const
 
 try:
+  import espnow
   from typing import Iterable
 except ImportError:
   pass
 
 from classes import *
-from utils import as_pin, settings
+from utils import as_pin, btomacstr, settings
 
 STATE_FILENAME = const('_state')
 PARAMID_FRUIT = const(0x30)
@@ -32,6 +33,7 @@ class App:
   ctlbtn: Button|None = None
   spi: busio.SPI|None = None
   i2c: busio.I2C|None = None
+  enow: espnow.ESPNow|None = None
   sd: SDHelper|None = None
   oled: OledDisplay|None = None
   wav_files: list[str]|None = None
@@ -52,7 +54,7 @@ class App:
       print(f'Running loop')
       while True:
         self.loop()
-        time.sleep(settings.loop_delay_secs)
+        # time.sleep(settings.loop_delay_secs)
     except KeyboardInterrupt:
       print(f'Stopping from Ctrl-C')
     finally:
@@ -60,6 +62,18 @@ class App:
   
   def init(self) -> None:
     self.deinit()
+    if settings.esp_enabled:
+      print('Initializing ESP-NOW wireless interface...')
+      try:
+        import espnow
+        import wifi
+        wifi.radio.enabled = True
+        wifi.radio.start_ap(' ', '', channel=settings.esp_channel, max_connections=0)
+        wifi.radio.stop_ap()
+        self.enow = espnow.ESPNow()
+        print(f'ESP-NOW active. MAC Address: {btomacstr(wifi.radio.mac_address)}')
+      except Exception as e:
+        print(f'Failed to initialize ESP-NOW: {e!r}')
     # Initialize the button
     self._button_pin = digitalio.DigitalInOut(as_pin(settings.button_pin))
     self._button_pin.direction = digitalio.Direction.INPUT
@@ -122,6 +136,8 @@ class App:
       self.load_saved_state()
 
   def deinit(self) -> None:
+    if self.enow:
+      self.enow.deinit()
     if self._button_pin:
       self._button_pin.deinit()
     if self._ctlbtn_pin:
@@ -138,6 +154,7 @@ class App:
     if self.sd:
       self.sd.close()
     displayio.release_displays()
+    self.enow = None
     self.button = None
     self.ctlbtn = None
     self.oled = None
@@ -158,6 +175,7 @@ class App:
   def loop(self) -> None:
     self.check_close()
     self.check_ctlmode_idle()
+    self.check_espnow_commands()
     if self.ctlbtn:
       self.ctlbtn.update()
       if self.ctlbtn.long_press:
@@ -199,6 +217,27 @@ class App:
       elapsed_ms = ticks_diff(ticks_ms(), self.last_ctl_active_at)
       if elapsed_ms / 1000 > settings.idle_secs:
         self.ctlmode_exit()
+
+  def check_espnow_commands(self) -> None:
+    if not self.enow:
+      return
+    packet = self.enow.read()
+    if packet:
+      try:
+        if packet.msg:
+          command = packet.msg[0]
+          # Command 0x05: Play random track
+          if command == 0x05:
+            print(f'Received single-byte trigger 0x05 from {packet.mac.hex()}')
+            self.play_random_wav_file()            
+          # Command 0x06: Play track by array index [command, index_byte]
+          elif command == 0x06:
+            if len(packet.msg) >= 2:
+              self.play_wav_by_index(packet.msg[1])
+            else:
+              print('Malformed 0x06 packet: missing index byte')
+      except Exception as e:
+        print(f'Error reading wireless byte payload: {e!r}')
 
   def handle_ctlbtn_long_press(self) -> None:
     if self.ctlmode:
@@ -302,17 +341,33 @@ class App:
       print(f' - {f}')
     print(f'{len(self.wav_files)} tracks indexed')
 
-  def play_random_wav_file(self):
-    if not self.sd.ensure_ready():
+  def play_random_wav_file(self) -> None:
+    if not self.sd or not self.sd.ensure_ready():
       print('Cannot play audio: No SD card detected')
       return
     if not self.wav_files:
       print('No wav files available')
       return
-    self.audio.stop()
-    self.check_close()
     # Pick a random filename from our clean list
     filename = random.choice(self.wav_files)
+    self.play_wav_by_filename(filename)
+
+  def play_wav_by_index(self, index: int) -> None:
+    if not self.sd or not self.sd.ensure_ready():
+      print('Cannot play audio: No SD card detected')
+      return
+    if not self.wav_files:
+      print('No wav files available')
+      return
+    if index >= len(self.wav_files):
+      print(f'No wav file at index {index}')
+      return
+    filename = self.wav_files[index]
+    self.play_wav_by_filename(filename)
+
+  def play_wav_by_filename(self, filename: str) -> None:
+    self.audio.stop()
+    self.check_close()
     fullpath = f'{settings.sd_path}/{filename}'
     print(f'Opening: {filename}')
     try:

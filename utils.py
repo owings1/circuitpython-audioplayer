@@ -8,6 +8,9 @@ def as_pin(pin: str|Pin) -> Pin:
     pin = getattr(board, pin)
   return pin
 
+def btomacstr(mac: bytes) -> str:
+  return ':'.join(f"{b:02x}" for b in mac)
+
 def init_settings(defaults: MT, settings: ModuleType) -> MT:
   for name in defaults.__dict__:
     if not hasattr(settings, name):
