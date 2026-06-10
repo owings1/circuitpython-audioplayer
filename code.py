@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import array
 import audiobusio
 import audiocore
 import board
@@ -25,9 +26,8 @@ from classes import *
 from utils import as_pin, btomacstr, couples, notetofreq, settings
 
 STATE_FILENAME = const('_state')
-PARAMID_FRUIT = const(0x30)
-PARAMID_P2 = const(0x31)
-PARAMID_P3 = const(0x32)
+PARAMID_DEFAULT_WAVEFORM = const(0x08)
+PARAMID_SYNTH_VOLUME = const(0x09)
 DURATION_SCALE = 0.1
 
 class App:
@@ -50,6 +50,8 @@ class App:
   synth: synthio.Synthesizer|None = None
   synth_envelope: synthio.Envelope|None = None
   note_queue: Generator[tuple[int, int]]|None = None
+  waveforms: tuple[array.array, ...]|None = None
+  active_waveform: int|None = None
   _fp = None
   _wave = None
   _sample = None
@@ -115,24 +117,27 @@ class App:
           x_offset=settings.oled_x_offset)
       except Exception as e:
         print(f'Failed to initialize display: {e!r}')
+    print(f'Creating waveform table')
+    self.waveforms = samples.create_wave_tables()
+    default_waveform = settings.synth_default_waveform
+    if default_waveform not in range(len(self.waveforms)):
+      default_waveform = samples.WTI_SINE
     self.paramsmap = {
-      PARAMID_FRUIT: ConfigParam(
-        id=PARAMID_FRUIT,
-        name='fruit',
-        title='Fruit',
-        choices=('apple', 'banana', 'cherry')),
-      PARAMID_P2: ConfigParam(
-        id=PARAMID_P2,
-        name='p2',
-        choices=range(1, 33)),
-      PARAMID_P3: ConfigParam(
-        id=PARAMID_P3,
-        name='p3',
-        choices=range(8))}
+      PARAMID_DEFAULT_WAVEFORM: ConfigParam(
+        id=PARAMID_DEFAULT_WAVEFORM,
+        name='synth_default_waveform',
+        title='Default Synth Wave',
+        choices=('sine', 'triangle', 'saw', 'square'),
+        selected=default_waveform),
+      PARAMID_SYNTH_VOLUME: ConfigParam(
+        id=PARAMID_SYNTH_VOLUME,
+        name='synth_volume',
+        title='Synth Volume',
+        choices=range(1, 11),
+        selected=9)}
     self.params = [
-      self.paramsmap[PARAMID_FRUIT],
-      self.paramsmap[PARAMID_P2],
-      self.paramsmap[PARAMID_P3]]
+      self.paramsmap[PARAMID_DEFAULT_WAVEFORM],
+      self.paramsmap[PARAMID_SYNTH_VOLUME]]
     self.sd = SDHelper(
       spi=self.spi,
       pin_cs=settings.sd_pin_cs,
@@ -142,14 +147,9 @@ class App:
       after_umount=self.after_umount)
     self.synth = synthio.Synthesizer(sample_rate=22050)
     # self.audio.play(self.synth)
-    self.synth_envelope = synthio.Envelope(
-      attack_time=settings.synth_attack_time,
-      decay_time=settings.synth_decay_time,
-      attack_level=settings.synth_attack_level * settings.synth_volume,
-      sustain_level=settings.synth_sustain_level * settings.synth_volume,
-      release_time=settings.synth_release_time)
     if self.sd.ensure_ready():
       self.load_saved_state()
+    self.init_envelope()
 
   def deinit(self) -> None:
     if self.enow:
@@ -192,11 +192,20 @@ class App:
     self.synth = None
     self.synth_envelope = None
     self.note_queue = None
+    self.waveforms = None
+    self.active_waveform = None
     self._wave = None
     self._fp = None
     self._sample = None
     self._button_pin = None
     self._ctlbtn_pin = None
+
+  @property
+  def default_waveform(self) -> int|None:
+    try:
+      return self.paramsmap[PARAMID_DEFAULT_WAVEFORM].selected
+    except KeyError:
+      pass
 
   def loop(self) -> None:
     self.check_close()
@@ -228,26 +237,16 @@ class App:
         if len(cmdbuf) < 2:
           raise ValueError('Malformed command: missing index byte')
         self.play_wav_by_index(cmdbuf[1])
-      # Command 0x07: Play 440hz sine wave for 10s
-      elif command == 0x07:
-        self.play_pure_tone(frequency=440, duration_secs=10.0)
-      # Command 0x08: Play 440hz synth for 2s
-      elif command == 0x08:
-        self.play_synth_note(frequency=440, duration_secs=2.0)
-      # Command 0x09: Play variable pitch/duration synth [command, midi_note, duration_scalar]
-      elif command == 0x09:
-        if len(cmdbuf) < 3:
-          raise ValueError('Malformed 0x09 command: missing midi_note or duration byte')
-        midi_note = cmdbuf[1]
-        duration_scalar = cmdbuf[2]
-        frequency = notetofreq(midi_note)
-        duration_secs = duration_scalar * DURATION_SCALE
-        self.play_synth_note(frequency=frequency, duration_secs=duration_secs)
       # Command 0x0A: Trigger Pre-Programmed Sequence [command, tune_id]
       elif command == 0x0A:
         if len(cmdbuf) < 2:
           raise ValueError('Malformed command: missing index byte')
-        self.play_prefab_tune(cmdbuf[1])
+        self.play_prefab_tune(cmdbuf[1], self.default_waveform)
+      # Command 0x0B: Trigger Pre-Programmed Sequence with Waveform [command, tune_id, waveform_id]
+      elif command == 0x0B:
+        if len(cmdbuf) < 3:
+          raise ValueError('Malformed command: missing index or waveform byte')
+        self.play_prefab_tune(cmdbuf[1], cmdbuf[2])
     except Exception as e:
       print(f'Error executing command: {e!r}')
     
@@ -335,6 +334,7 @@ class App:
     self.ctlmode = False
     self.last_ctl_active_at = None
     if self.ctldirty:
+      self.init_envelope()
       self.save_state()
     if self.oled:
       self.oled.sleep()
@@ -346,7 +346,7 @@ class App:
       print(f'Warning: no param selected')
       return
     param = self.params[self.param_selected]
-    self.oled.header = param.name
+    self.oled.header = param.title
     self.oled.body = str(param.value)
     self.oled.wake()
 
@@ -400,6 +400,16 @@ class App:
       else:
         print(f'Warning: ignored invalid {param.name} index {index}')
 
+  def init_envelope(self) -> None:
+    self.synth_envelope = synthio.Envelope(
+      attack_time=settings.synth_attack_time,
+      decay_time=settings.synth_decay_time,
+      attack_level=settings.synth_attack_level * (
+        self.paramsmap[PARAMID_SYNTH_VOLUME].value / 10),
+      sustain_level=settings.synth_sustain_level * (
+        self.paramsmap[PARAMID_SYNTH_VOLUME].value / 10),
+      release_time=settings.synth_release_time)
+    
   def reload_wav_files(self) -> None:
     self.wav_files = [
       f for f in os.listdir(settings.sd_path)
@@ -449,25 +459,7 @@ class App:
     except Exception as e:
       print(f'Error playing {filename}: {e!r}')
 
-  def play_pure_tone(self, frequency: int, duration_secs: float) -> None:
-    self.synth.release_all()
-    self.audio.stop()
-    self.check_close()
-    self._sample = samples.generate_sine_wave(frequency=frequency)
-    self.audio_stop_at = ticks_ms() + int(duration_secs * 1000)
-    self.audio.play(self._sample, loop=True)
-
-  def play_synth_note(self, frequency: float, duration_secs: float) -> None:
-    self.synth.release_all()
-    self.audio.stop()
-    self.check_close()
-    self.audio.play(self.synth)
-    self._sample = synthio.Note(frequency=frequency, envelope=self.synth_envelope)
-    print(f'Pressing synth note: {frequency}Hz')
-    self.synth.press(self._sample)
-    self.audio_stop_at = ticks_ms() + int(duration_secs * 1000)
-
-  def play_prefab_tune(self, index: int) -> None:
+  def play_prefab_tune(self, index: int, waveform: int) -> None:
     if index >= len(settings.prefab_tunes):
       print(f'No tune at index {index}')
       return
@@ -489,6 +481,10 @@ class App:
     self.synth.release_all()
     self.audio.stop()
     self.check_close()
+    if waveform not in range(len(self.waveforms)):
+      print(f'Invalid {waveform=}, using default')
+      waveform = self.default_waveform
+    self.active_waveform = waveform
     self.audio.play(self.synth)
     self.note_queue = couples(tune)
     self.play_next_queued_note()
@@ -504,7 +500,10 @@ class App:
       return
     try:
       frequency = notetofreq(midi_note)
-      self._sample = synthio.Note(frequency=frequency, envelope=self.synth_envelope)
+      self._sample = synthio.Note(
+        frequency=frequency,
+        envelope=self.synth_envelope,
+        waveform=self.waveforms[self.active_waveform])
       self.synth.press(self._sample)
       duration_secs = duration_scalar * DURATION_SCALE
       self.audio_stop_at = ticks_ms() + int(duration_secs * 1000)

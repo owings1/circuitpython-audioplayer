@@ -30,7 +30,7 @@ synth_decay_time = 0.0
 synth_attack_level = 1.0
 synth_sustain_level = 1.0
 synth_release_time = 0.02
-synth_volume = 0.5
+synth_default_waveform = 0x00
 
 prefab_tunes = [
   b'\x3c\x02\x40\x02\x43\x02\x48\x06',
