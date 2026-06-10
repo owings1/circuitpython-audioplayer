@@ -11,3 +11,4 @@ tof_enabled = False
 tof_payload = b'\x05'
 tof_threshold_mm = 400
 tof_cooldown_secs = 2.5
+tof_debounce_secs = 0.05

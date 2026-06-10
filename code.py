@@ -8,6 +8,7 @@ import digitalio
 import displayio
 import os
 import random
+import synthio
 import time
 from adafruit_debouncer import Button
 from adafruit_ticks import ticks_ms, ticks_diff
@@ -19,6 +20,7 @@ try:
 except ImportError:
   pass
 
+import samples
 from classes import *
 from utils import as_pin, btomacstr, settings
 
@@ -43,8 +45,12 @@ class App:
   paramsmap: dict[int, ConfigParam]|None = None
   param_selected: int|None = None
   last_ctl_active_at: int|None = None
+  audio_stop_at: int|None = None
+  synth: synthio.Synthesizer|None = None
+  synth_envelope: synthio.Envelope|None = None
   _fp = None
   _wave = None
+  _sample = None
   _button_pin: digitalio.DigitalInOut|None = None
   _ctlbtn_pin: digitalio.DigitalInOut|None = None
 
@@ -132,6 +138,14 @@ class App:
       after_mount=self.after_mount,
       before_umount=self.before_umount,
       after_umount=self.after_umount)
+    self.synth = synthio.Synthesizer(sample_rate=22050)
+    self.audio.play(self.synth)
+    self.synth_envelope = synthio.Envelope(
+      attack_time=settings.synth_attack_time,
+      decay_time=settings.synth_decay_time,
+      attack_level=settings.synth_attack_level,
+      sustain_level=settings.synth_sustain_level,
+      release_time=settings.synth_release_time)
     if self.sd.ensure_ready():
       self.load_saved_state()
 
@@ -167,8 +181,12 @@ class App:
     self.paramsmap = None
     self.param_selected = None
     self.last_ctl_active_at = None
+    self.audio_stop_at = None
+    self.synth = None
+    self.synth_envelope = None
     self._wave = None
     self._fp = None
+    self._sample = None
     self._button_pin = None
     self._ctlbtn_pin = None
 
@@ -189,6 +207,39 @@ class App:
       elif self.button.short_count:
         self.handle_button_short_press(self.button.short_count)
 
+  def execute(self, cmdbuf: bytes) -> None:
+    try:
+      if cmdbuf:
+        command = cmdbuf[0]
+        # Command 0x05: Play random track
+        if command == 0x05:
+          self.play_random_wav_file()            
+        # Command 0x06: Play track by array index [command, index_byte]
+        elif command == 0x06:
+          if len(cmdbuf) < 2:
+            raise ValueError('Malformed command: missing index byte')
+          self.play_wav_by_index(cmdbuf[1])
+        # Command 0x07: Play 440hz sine wave for 10s
+        elif command == 0x07:
+          self.play_pure_tone(frequency=440, duration_secs=10.0)
+        # Command 0x08: Play 440hz synth for 2s
+        elif command == 0x08:
+          self.play_synth_note(frequency=440, duration_secs=2.0)
+        # Command 0x09: Play variable pitch/duration synth [command, midi_note, duration_scalar]
+        elif command == 0x09:
+          if len(cmdbuf) < 3:
+            raise ValueError('Malformed 0x09 command: missing midi_note or duration byte')
+          midi_note = cmdbuf[1]
+          duration_scalar = cmdbuf[2]
+          # Translate MIDI note to exact frequency (Tuning standard A4 = 440Hz)
+          frequency = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
+          # Map duration step to 100ms units (e.g. value of 20 = 2.0 seconds)
+          duration_secs = duration_scalar * 0.1
+          print(f'Received 0x09: MIDI Note {midi_note} -> {frequency:.2f}Hz for {duration_secs:.1f}s')
+          self.play_synth_note(frequency=frequency, duration_secs=duration_secs)
+    except Exception as e:
+      print(f'Error executing command: {e!r}')
+    
   def handle_button_long_press(self) -> None:
     self.handle_button_short_press(1)
 
@@ -203,14 +254,27 @@ class App:
       self.last_ctl_active_at = ticks_ms()
       self.ctldirty = True
     else:
-      self.play_random_wav_file()
+      self.execute(settings.button_payload)
 
   def check_close(self):
-    if self._fp and not self.audio.playing:
-      print('Playback complete')
-      self._fp.close()
-      self._fp = None
-      self._wave = None
+    if self.audio_stop_at is not None:
+      if ticks_ms() >= self.audio_stop_at:
+        if isinstance(self._sample, synthio.Note):
+          print('Releasing synth note')
+          self.synth.release(self._sample)
+          self._sample = None
+        else:
+          self.audio.stop()
+        self.audio_stop_at = None
+    if not self.audio.playing:
+      if self._sample:
+        print(f'Sample playing complete')
+        self._sample = None
+      elif self._fp:
+        print('Playback complete')
+        self._fp.close()
+        self._fp = None
+        self._wave = None
 
   def check_ctlmode_idle(self) -> None:
     if self.ctlmode and self.last_ctl_active_at is not None:
@@ -222,22 +286,9 @@ class App:
     if not self.enow:
       return
     packet = self.enow.read()
-    if packet:
-      try:
-        if packet.msg:
-          command = packet.msg[0]
-          # Command 0x05: Play random track
-          if command == 0x05:
-            print(f'Received single-byte trigger 0x05 from {packet.mac.hex()}')
-            self.play_random_wav_file()            
-          # Command 0x06: Play track by array index [command, index_byte]
-          elif command == 0x06:
-            if len(packet.msg) >= 2:
-              self.play_wav_by_index(packet.msg[1])
-            else:
-              print('Malformed 0x06 packet: missing index byte')
-      except Exception as e:
-        print(f'Error reading wireless byte payload: {e!r}')
+    if packet and packet.msg:
+      print(f'Received packet from {btomacstr(packet.mac)}')
+      self.execute(packet.msg)
 
   def handle_ctlbtn_long_press(self) -> None:
     if self.ctlmode:
@@ -377,6 +428,22 @@ class App:
       self.audio.play(self._wave)
     except Exception as e:
       print(f'Error playing {filename}: {e!r}')
+
+  def play_pure_tone(self, frequency: int, duration_secs: float) -> None:
+    self.audio.stop()
+    self.check_close()
+    self._sample = samples.generate_sine_wave(frequency=frequency)
+    self.audio_stop_at = ticks_ms() + duration_secs * 1000
+    self.audio.play(self._sample, loop=True)
+
+  def play_synth_note(self, frequency: float, duration_secs: float) -> None:
+    self.audio.stop()
+    self.check_close()
+    self.audio.play(self.synth)
+    self._sample = synthio.Note(frequency=frequency, envelope=self.synth_envelope)
+    print(f'Pressing synth note: {frequency}Hz')
+    self.synth.press(self._sample)
+    self.audio_stop_at = ticks_ms() + duration_secs * 1000
 
   def after_mount(self) -> None:
     self.reload_wav_files()

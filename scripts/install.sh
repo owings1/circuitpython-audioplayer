@@ -20,6 +20,7 @@ install-recvr() {
     classes.py
     code.py
     defaults.py
+    samples.py
     utils.py
   )
   for file in "${files[@]}"; do

@@ -25,6 +25,7 @@ class App:
   tof: adafruit_vl53l0x.VL53L0X|None = None
   last_tof_trigger_at: int|None = None
   tof_armed: bool = True
+  tof_trigger_start: int|None = None
   _button_pin: digitalio.DigitalInOut|None = None
 
   def main(self) -> None:
@@ -78,28 +79,43 @@ class App:
     self.receiver_peer = None
     self.last_tof_trigger_at = None
     self.tof_armed = True
+    self.tof_trigger_start = None
     self._button_pin = None
 
   def loop(self) -> None:
     if self.button:
-      self.button.update()
-      if self.button.short_count or self.button.long_press:
-        self.send_payload(settings.button_payload)
+      self.run_button()
     if self.tof:
-      distance = self.tof.range
-      if distance < settings.tof_threshold_mm:
-        if self.tof_armed:
-          current_time = ticks_ms()
-          if (
-            self.last_tof_trigger_at is None or
-            ticks_diff(current_time, self.last_tof_trigger_at) > settings.tof_cooldown_secs * 1000
-          ):
-            print(f'Motion Detected! Target Range: {distance}mm')
-            self.send_payload(settings.tof_payload)
-            self.last_tof_trigger_at = current_time
-            self.tof_armed = False
-      else:
-        self.tof_armed = True
+      self.run_tof()
+
+  def run_button(self) -> None:
+    self.button.update()
+    if self.button.short_count or self.button.long_press:
+      self.send_payload(settings.button_payload)
+
+  def run_tof(self) -> None:
+    distance = self.tof.range
+    if distance >= settings.tof_threshold_mm:
+      self.tof_armed = True
+      self.tof_trigger_start = None
+      return
+    if not self.tof_armed:
+      return
+    current_time = ticks_ms()
+    # Debounce
+    if self.tof_trigger_start is None:
+      self.tof_trigger_start = current_time
+    if ticks_diff(current_time, self.tof_trigger_start) < settings.tof_debounce_secs * 1000:
+      return
+    # Cooldown
+    if (
+      self.last_tof_trigger_at is not None and
+      ticks_diff(current_time, self.last_tof_trigger_at) < settings.tof_cooldown_secs * 1000):
+      return
+    print(f'Motion Detected! Target Range: {distance}mm')
+    self.send_payload(settings.tof_payload)
+    self.last_tof_trigger_at = current_time
+    self.tof_armed = False
 
   def send_payload(self, buf: bytes) -> None:
     if self.enow is None:

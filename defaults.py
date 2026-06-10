@@ -4,6 +4,7 @@ audio_pin_din = 'D2'
 
 button_pin = 'D7'
 button_long_press_secs = 1
+button_payload = b'\x05'
 ctlbtn_enabled = True
 ctlbtn_pin = 'D6'
 
@@ -22,13 +23,21 @@ oled_x_offset = 0
 esp_enabled = True
 esp_channel = 6
 
+sample_amplitude_max = 25_000
+
+synth_attack_time = 0.02
+synth_decay_time = 0.0
+synth_attack_level = 1.0
+synth_sustain_level = 1.0
+synth_release_time = 0.02
+
 loop_delay_secs = 0.001
 idle_secs = 10
 
 # xmitter only
 receiver_mac = '00:00:00:00:00:00'
-button_payload = b'\x05'
 tof_enabled = False
 tof_payload = b'\x05'
 tof_threshold_mm = 400
 tof_cooldown_secs = 2.5
+tof_debounce_secs = 0.05
