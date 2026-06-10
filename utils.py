@@ -11,6 +11,21 @@ def as_pin(pin: str|Pin) -> Pin:
 def btomacstr(mac: bytes) -> str:
   return ':'.join(f"{b:02x}" for b in mac)
 
+def notetofreq(note: int) -> float:
+  "Translate MIDI note to exact frequency (Tuning standard A4 = 440Hz)"
+  if note <= 0:
+    return 0.0
+  return 440.0 * (2.0 ** ((note - 69) / 12.0))
+
+def couples(it: Iterable[T]) -> Generator[tuple[T, T]]:
+  it = iter(it)
+  for a in it:
+    try:
+      b = next(it)
+    except StopIteration:
+      break
+    yield a, b
+    
 def init_settings(defaults: MT, settings: ModuleType) -> MT:
   for name in defaults.__dict__:
     if not hasattr(settings, name):
@@ -34,7 +49,8 @@ def i2c_scan():
 # IDE Environment
 try:
   from types import ModuleType
-  from typing import TypeVar
+  from typing import Generator, Iterable, TypeVar
   MT = TypeVar('MT', bound=ModuleType)
+  T = TypeVar('T')
 except ImportError:
   pass

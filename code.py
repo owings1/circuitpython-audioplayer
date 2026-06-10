@@ -16,18 +16,19 @@ from micropython import const
 
 try:
   import espnow
-  from typing import Iterable
+  from typing import Generator, Iterable
 except ImportError:
   pass
 
 import samples
 from classes import *
-from utils import as_pin, btomacstr, settings
+from utils import as_pin, btomacstr, couples, notetofreq, settings
 
 STATE_FILENAME = const('_state')
 PARAMID_FRUIT = const(0x30)
 PARAMID_P2 = const(0x31)
 PARAMID_P3 = const(0x32)
+DURATION_SCALE = 0.1
 
 class App:
   audio: audiobusio.I2SOut|None = None
@@ -48,6 +49,7 @@ class App:
   audio_stop_at: int|None = None
   synth: synthio.Synthesizer|None = None
   synth_envelope: synthio.Envelope|None = None
+  note_queue: Generator[tuple[int, int]]|None = None
   _fp = None
   _wave = None
   _sample = None
@@ -139,12 +141,12 @@ class App:
       before_umount=self.before_umount,
       after_umount=self.after_umount)
     self.synth = synthio.Synthesizer(sample_rate=22050)
-    self.audio.play(self.synth)
+    # self.audio.play(self.synth)
     self.synth_envelope = synthio.Envelope(
       attack_time=settings.synth_attack_time,
       decay_time=settings.synth_decay_time,
-      attack_level=settings.synth_attack_level,
-      sustain_level=settings.synth_sustain_level,
+      attack_level=settings.synth_attack_level * settings.synth_volume,
+      sustain_level=settings.synth_sustain_level * settings.synth_volume,
       release_time=settings.synth_release_time)
     if self.sd.ensure_ready():
       self.load_saved_state()
@@ -167,6 +169,11 @@ class App:
         pass
     if self.sd:
       self.sd.close()
+    if self.note_queue:
+      try:
+        self.note_queue.close()
+      except:
+        pass
     displayio.release_displays()
     self.enow = None
     self.button = None
@@ -184,6 +191,7 @@ class App:
     self.audio_stop_at = None
     self.synth = None
     self.synth_envelope = None
+    self.note_queue = None
     self._wave = None
     self._fp = None
     self._sample = None
@@ -208,35 +216,38 @@ class App:
         self.handle_button_short_press(self.button.short_count)
 
   def execute(self, cmdbuf: bytes) -> None:
+    if not cmdbuf:
+      return
     try:
-      if cmdbuf:
-        command = cmdbuf[0]
-        # Command 0x05: Play random track
-        if command == 0x05:
-          self.play_random_wav_file()            
-        # Command 0x06: Play track by array index [command, index_byte]
-        elif command == 0x06:
-          if len(cmdbuf) < 2:
-            raise ValueError('Malformed command: missing index byte')
-          self.play_wav_by_index(cmdbuf[1])
-        # Command 0x07: Play 440hz sine wave for 10s
-        elif command == 0x07:
-          self.play_pure_tone(frequency=440, duration_secs=10.0)
-        # Command 0x08: Play 440hz synth for 2s
-        elif command == 0x08:
-          self.play_synth_note(frequency=440, duration_secs=2.0)
-        # Command 0x09: Play variable pitch/duration synth [command, midi_note, duration_scalar]
-        elif command == 0x09:
-          if len(cmdbuf) < 3:
-            raise ValueError('Malformed 0x09 command: missing midi_note or duration byte')
-          midi_note = cmdbuf[1]
-          duration_scalar = cmdbuf[2]
-          # Translate MIDI note to exact frequency (Tuning standard A4 = 440Hz)
-          frequency = 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
-          # Map duration step to 100ms units (e.g. value of 20 = 2.0 seconds)
-          duration_secs = duration_scalar * 0.1
-          print(f'Received 0x09: MIDI Note {midi_note} -> {frequency:.2f}Hz for {duration_secs:.1f}s')
-          self.play_synth_note(frequency=frequency, duration_secs=duration_secs)
+      command = cmdbuf[0]
+      # Command 0x05: Play random track
+      if command == 0x05:
+        self.play_random_wav_file()            
+      # Command 0x06: Play track by array index [command, index_byte]
+      elif command == 0x06:
+        if len(cmdbuf) < 2:
+          raise ValueError('Malformed command: missing index byte')
+        self.play_wav_by_index(cmdbuf[1])
+      # Command 0x07: Play 440hz sine wave for 10s
+      elif command == 0x07:
+        self.play_pure_tone(frequency=440, duration_secs=10.0)
+      # Command 0x08: Play 440hz synth for 2s
+      elif command == 0x08:
+        self.play_synth_note(frequency=440, duration_secs=2.0)
+      # Command 0x09: Play variable pitch/duration synth [command, midi_note, duration_scalar]
+      elif command == 0x09:
+        if len(cmdbuf) < 3:
+          raise ValueError('Malformed 0x09 command: missing midi_note or duration byte')
+        midi_note = cmdbuf[1]
+        duration_scalar = cmdbuf[2]
+        frequency = notetofreq(midi_note)
+        duration_secs = duration_scalar * DURATION_SCALE
+        self.play_synth_note(frequency=frequency, duration_secs=duration_secs)
+      # Command 0x0A: Trigger Pre-Programmed Sequence [command, tune_id]
+      elif command == 0x0A:
+        if len(cmdbuf) < 2:
+          raise ValueError('Malformed command: missing index byte')
+        self.play_prefab_tune(cmdbuf[1])
     except Exception as e:
       print(f'Error executing command: {e!r}')
     
@@ -266,7 +277,14 @@ class App:
         else:
           self.audio.stop()
         self.audio_stop_at = None
-    if not self.audio.playing:
+        if self.note_queue:
+          self.play_next_queued_note()
+    try:
+      playing = self.audio.playing
+    except ValueError:
+      # Corner case: ValueError: Object has been deinitialized and can no longer be used. Create a new object.
+      return
+    if not playing:
       if self._sample:
         print(f'Sample playing complete')
         self._sample = None
@@ -417,8 +435,10 @@ class App:
     self.play_wav_by_filename(filename)
 
   def play_wav_by_filename(self, filename: str) -> None:
+    self.synth.release_all()
     self.audio.stop()
     self.check_close()
+    self.audio_stop_at = None
     fullpath = f'{settings.sd_path}/{filename}'
     print(f'Opening: {filename}')
     try:
@@ -430,20 +450,72 @@ class App:
       print(f'Error playing {filename}: {e!r}')
 
   def play_pure_tone(self, frequency: int, duration_secs: float) -> None:
+    self.synth.release_all()
     self.audio.stop()
     self.check_close()
     self._sample = samples.generate_sine_wave(frequency=frequency)
-    self.audio_stop_at = ticks_ms() + duration_secs * 1000
+    self.audio_stop_at = ticks_ms() + int(duration_secs * 1000)
     self.audio.play(self._sample, loop=True)
 
   def play_synth_note(self, frequency: float, duration_secs: float) -> None:
+    self.synth.release_all()
     self.audio.stop()
     self.check_close()
     self.audio.play(self.synth)
     self._sample = synthio.Note(frequency=frequency, envelope=self.synth_envelope)
     print(f'Pressing synth note: {frequency}Hz')
     self.synth.press(self._sample)
-    self.audio_stop_at = ticks_ms() + duration_secs * 1000
+    self.audio_stop_at = ticks_ms() + int(duration_secs * 1000)
+
+  def play_prefab_tune(self, index: int) -> None:
+    if index >= len(settings.prefab_tunes):
+      print(f'No tune at index {index}')
+      return
+    tune = settings.prefab_tunes[index]
+    if not tune or len(tune) < 2:
+      print(f'Empty tune at index {index}')
+      return
+    # Safely clear any active generator state queues first
+    if self.note_queue:
+      try:
+        self.note_queue.close()
+      except:
+        pass
+      self.note_queue = None
+    # Clear open file structures, wave handles, or single sustaining synth notes
+    if self._fp or self.audio_stop_at is not None:
+      self.audio_stop_at = ticks_ms() # Force immediate expiration threshold
+      self.check_close()
+    self.synth.release_all()
+    self.audio.stop()
+    self.check_close()
+    self.audio.play(self.synth)
+    self.note_queue = couples(tune)
+    self.play_next_queued_note()
+
+  def play_next_queued_note(self) -> None:
+    if not self.note_queue:
+      return
+    try:
+      midi_note, duration_scalar = next(self.note_queue)
+    except StopIteration:
+      print(f'Tune playback complete')
+      self.note_queue = None
+      return
+    try:
+      frequency = notetofreq(midi_note)
+      self._sample = synthio.Note(frequency=frequency, envelope=self.synth_envelope)
+      self.synth.press(self._sample)
+      duration_secs = duration_scalar * DURATION_SCALE
+      self.audio_stop_at = ticks_ms() + int(duration_secs * 1000)
+    except Exception as e:
+      print(f'Queue execution error: {e!r}')
+      try:
+        self.note_queue.close()
+      except:
+        pass
+      self.note_queue = None
+      return
 
   def after_mount(self) -> None:
     self.reload_wav_files()
