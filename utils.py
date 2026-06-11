@@ -11,6 +11,9 @@ def as_pin(pin: str|Pin) -> Pin:
 def btomacstr(mac: bytes) -> str:
   return ':'.join(f"{b:02x}" for b in mac)
 
+def macstrtob(mac: str) -> bytes:
+  return bytes.fromhex(mac.replace(':', ''))
+
 def notetofreq(note: int) -> float:
   "Translate MIDI note to exact frequency (Tuning standard A4 = 440Hz)"
   if note <= 0:

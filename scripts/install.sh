@@ -8,11 +8,7 @@ dest="$(realpath "$1")"
 cd "$(dirname "$0")/.."
 
 main() {
-  if [[ -e "$dest/_transmitter" ]]; then
-    install-xmitter
-  else
-    install-recvr
-  fi
+  install-recvr
 }
 
 install-recvr() {
@@ -29,33 +25,9 @@ install-recvr() {
   cp -X -v -n \
     settings.py \
     "$dest" || true
-  cp -X -v -n -r \
-    lib/* \
-    "$dest/lib/" || true
-}
-
-install-xmitter() {
-  local files=(
-    utils.py
-  )
-  for file in "${files[@]}"; do
-    copy-update "$file" "$dest/$file"
-  done
-  cp -X -v -n \
-    settings.py \
-    "$dest" || true
-  pushd xmitter > /dev/null
-  files=(
-    code.py
-    defaults.py
-  )
-  for file in "${files[@]}"; do
-    copy-update "$file" "$dest/$file"
-  done
-  cp -X -v -n -r \
-    lib/* \
-    "$dest/lib/" || true
-  popd > /dev/null
+  # cp -X -v -n -r \
+  #   lib/* \
+  #   "$dest/lib/" || true
 }
 
 copy-update() {

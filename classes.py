@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import busio
-import displayio
-import fontio
-import sdcardio
-import storage
-import terminalio
-from busdisplay import BusDisplay
-from i2cdisplaybus import I2CDisplayBus
 from microcontroller import Pin
+
+try:
+  from typing import Any, Callable, Sequence
+  from adafruit_display_text.label import Label
+  from busdisplay import BusDisplay
+  from i2cdisplaybus import I2CDisplayBus
+except ImportError:
+  pass
 
 from utils import as_pin
 
@@ -56,9 +57,11 @@ class OledDisplay:
     height: int,
     line_spacing: int = 4,
     x_offset: int = 0,
-    font: fontio.FontProtocol = terminalio.FONT,
   ) -> None:
+    import displayio
+    import terminalio
     from adafruit_display_text.label import Label
+    font = terminalio.FONT
     self.driver = driver
     self.display = self.get_display_class(driver)(
       bus=bus,
@@ -172,6 +175,8 @@ class SDHelper:
     print('Attempting lazy SD card initialization...')
     try:
       self.close()
+      import sdcardio
+      import storage
       self.sdcard = sdcardio.SDCard(self.spi, self.pin_cs)
       vfs = storage.VfsFat(self.sdcard)
       storage.mount(vfs, self.path)
@@ -193,6 +198,7 @@ class SDHelper:
     if self.before_umount:
       self.before_umount()
     try:
+      import storage
       storage.umount(self.path)
     except:
       pass
@@ -204,10 +210,3 @@ class SDHelper:
     self.sdcard = None
     if self.after_umount:
       self.after_umount()
-
-# Typing
-try:
-  from adafruit_display_text.label import Label
-  from typing import Any, Callable, Sequence
-except ImportError:
-  pass
