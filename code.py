@@ -30,6 +30,8 @@ DURATION_SCALE = 0.1
 
 class App:
   audio: audiobusio.I2SOut|None = None
+  audio_busy: bool = False
+  audio_stop_at: int|None = None
   button: Button|None = None
   ctlbtn: Button|None = None
   spi: busio.SPI|None = None
@@ -44,7 +46,6 @@ class App:
   paramsmap: dict[int, ConfigParam]|None = None
   param_selected: int|None = None
   last_ctl_active_at: int|None = None
-  audio_stop_at: int|None = None
   synth: synthio.Synthesizer|None = None
   synth_envelope: synthio.Envelope|None = None
   note_queue: Generator[tuple[int, int]]|None = None
@@ -231,6 +232,7 @@ class App:
     self.paramsmap = None
     self.param_selected = None
     self.last_ctl_active_at = None
+    self.audio_busy = False
     self.audio_stop_at = None
     self.synth = None
     self.synth_envelope = None
@@ -256,9 +258,10 @@ class App:
       pass
 
   def loop(self) -> None:
-    self.check_close()
+    if self.audio:
+      self.run_audio()
     if self.enow is not None:
-      self.check_espnow_commands()
+      self.run_esp()
     if self.ctlbtn:
       self.run_ctlbtn()
     if self.button:
@@ -318,6 +321,44 @@ class App:
     else:
       self.send(payload, peerid)
 
+  def run_audio(self):
+    if self.synth:
+      if self.audio_stop_at is not None:
+        if ticks_ms() >= self.audio_stop_at:
+          if self._sample:
+            print('Releasing synth note')
+            self.synth.release(self._sample)
+            self._sample = None
+          else:
+            self.audio.stop()
+          self.audio_stop_at = None
+          if self.note_queue:
+            self.play_next_queued_note()
+    try:
+      playing = self.audio.playing
+    except ValueError:
+      # Corner case: ValueError: Object has been deinitialized and can no longer be used. Create a new object.
+      return
+    if not playing:
+      if self._sample:
+        print(f'Sample playing complete')
+        self._sample = None
+      elif self._fp:
+        print('Playback complete')
+        self._fp.close()
+        self._fp = None
+        self._wave = None
+      if self.audio_busy:
+        self.audio_busy = False
+
+  def run_esp(self) -> None:
+    if not self.enow:
+      return
+    packet = self.enow.read()
+    if packet and packet.msg:
+      print(f'Received packet from {btomacstr(packet.mac)}')
+      self.execute(packet.msg)
+
   def run_button(self) -> None:
     self.button.update()
     if self.button.long_press:
@@ -376,50 +417,11 @@ class App:
     else:
       self.send_or_execute(settings.button_payload, settings.button_peer)
 
-  def check_close(self):
-    if not self.audio:
-      return
-    if self.synth:
-      if self.audio_stop_at is not None:
-        if ticks_ms() >= self.audio_stop_at:
-          from synthio import Note
-          if isinstance(self._sample, Note):
-            print('Releasing synth note')
-            self.synth.release(self._sample)
-            self._sample = None
-          else:
-            self.audio.stop()
-          self.audio_stop_at = None
-          if self.note_queue:
-            self.play_next_queued_note()
-    try:
-      playing = self.audio.playing
-    except ValueError:
-      # Corner case: ValueError: Object has been deinitialized and can no longer be used. Create a new object.
-      return
-    if not playing:
-      if self._sample:
-        print(f'Sample playing complete')
-        self._sample = None
-      elif self._fp:
-        print('Playback complete')
-        self._fp.close()
-        self._fp = None
-        self._wave = None
-
   def check_ctlmode_idle(self) -> None:
     if self.ctlmode and self.last_ctl_active_at is not None:
       elapsed_ms = ticks_diff(ticks_ms(), self.last_ctl_active_at)
       if elapsed_ms / 1000 > settings.idle_secs:
         self.ctlmode_exit()
-
-  def check_espnow_commands(self) -> None:
-    if not self.enow:
-      return
-    packet = self.enow.read()
-    if packet and packet.msg:
-      print(f'Received packet from {btomacstr(packet.mac)}')
-      self.execute(packet.msg)
 
   def handle_ctlbtn_long_press(self) -> None:
     if self.ctlmode:
@@ -517,6 +519,7 @@ class App:
         print(f'Warning: ignored invalid {param.name} index {index}')
 
   def init_envelope(self) -> None:
+    print(f'Initializing synth envelope')
     try:
       volume = self.paramsmap[PARAMID_SYNTH_VOLUME].value
     except KeyError:
@@ -570,10 +573,9 @@ class App:
     if not self.audio:
       print(f'Cannot play wav file: No audio initialized')
       return
-    if self.synth:
-      self.synth.release_all()
-    self.audio.stop()
-    self.check_close()
+    if self.audio_busy:
+      print(f'Audio busy, not playing wav')
+      return
     self.audio_stop_at = None
     fullpath = f'{settings.sd_path}/{filename}'
     print(f'Opening: {filename}')
@@ -583,6 +585,7 @@ class App:
       self._wave = WaveFile(self._fp)
       print(f'Playing track...')
       self.audio.play(self._wave)
+      self.audio_busy = True
     except Exception as e:
       print(f'Error playing {filename}: {e!r}')
 
@@ -598,35 +601,26 @@ class App:
     if not tune or len(tune) < 2:
       print(f'Empty tune at index {index}')
       return
-    # Safely clear any active generator state queues first
-    if self.note_queue:
-      try:
-        self.note_queue.close()
-      except:
-        pass
-      self.note_queue = None
-    if self._fp or self.audio_stop_at is not None:
-      self.audio_stop_at = ticks_ms() # Force immediate expiration threshold
-      self.check_close()
-    self.synth.release_all()
-    self.audio.stop()
-    self.check_close()
     if waveform not in range(len(self.waveforms)):
       print(f'Invalid {waveform=}, using default')
       waveform = self.default_waveform
+    if self.audio_busy:
+      print('Audio busy, not playing tune')
+      return
     self.active_waveform = waveform
-    self.audio.play(self.synth)
     self.note_queue = couples(tune)
+    self.audio.play(self.synth)
+    self.audio_busy = True
     self.play_next_queued_note()
 
   def play_next_queued_note(self) -> None:
-    if not self.note_queue:
-      return
     try:
       midi_note, duration_scalar = next(self.note_queue)
     except StopIteration:
       print(f'Tune playback complete')
+      self.synth.release_all()
       self.note_queue = None
+      self.audio_busy = False
       return
     try:
       frequency = notetofreq(midi_note)
@@ -651,7 +645,7 @@ class App:
     self.reload_wav_files()
 
   def before_umount(self) -> None:
-    self.check_close()
+    self.run_audio()
 
   def after_umount(self) -> None:
     self.wav_files = None
