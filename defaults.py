@@ -28,7 +28,6 @@ oled_height = 64
 oled_line_spacing = 4
 oled_x_offset = 0
 
-
 synth_enabled = True
 synth_volume = 9
 synth_attack_time = 0.02
@@ -56,10 +55,11 @@ prefab_tunes = [
 loop_delay_secs = 0.001
 idle_secs = 10
 
-# xmitter only
 tof_enabled = False
 tof_payload = b'\x05'
 tof_peer = None
-tof_threshold_mm = 400
+tof_threshold = 4
+tof_threshold_scale = 100
+tof_offset_mm = 0
 tof_cooldown_secs = 2.5
 tof_debounce_secs = 0.05

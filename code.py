@@ -9,6 +9,7 @@ import random
 import time
 from adafruit_debouncer import Button
 from adafruit_ticks import ticks_ms, ticks_diff
+from microcontroller import Pin
 from micropython import const
 
 try:
@@ -26,6 +27,7 @@ from utils import as_pin, btomacstr, macstrtob, couples, notetofreq, settings
 STATE_FILENAME = const('_state')
 PARAMID_DEFAULT_WAVEFORM = const(0x08)
 PARAMID_SYNTH_VOLUME = const(0x09)
+PARAMID_TOF_THRESHOLD = const(0x10)
 DURATION_SCALE = 0.1
 
 class App:
@@ -94,17 +96,17 @@ class App:
         peer = espnow.Peer(mac=macstrtob(macstr))
         self.enow.peers.append(peer)
         self._peers.append(peer)
-    # Initialize the button
+    # Initialize the buttons
     if settings.button_enabled:
-      self._button_pin = digitalio.DigitalInOut(as_pin(settings.button_pin))
-      self._button_pin.direction = digitalio.Direction.INPUT
-      self._button_pin.pull = digitalio.Pull.UP
-      self.button = Button(self._button_pin, long_duration_ms=settings.button_long_press_secs * 1000)
+      self._button_pin = self.make_buttonio(settings.button_pin)
+      self.button = Button(
+        self._button_pin,
+        long_duration_ms=settings.button_long_press_secs * 1000)
     if settings.ctlbtn_enabled:
-      self._ctlbtn_pin = digitalio.DigitalInOut(as_pin(settings.ctlbtn_pin))
-      self._ctlbtn_pin.direction = digitalio.Direction.INPUT
-      self._ctlbtn_pin.pull = digitalio.Pull.UP
-      self.ctlbtn = Button(self._ctlbtn_pin, long_duration_ms=settings.button_long_press_secs * 1000)
+      self._ctlbtn_pin = self.make_buttonio(settings.ctlbtn_pin)
+      self.ctlbtn = Button(
+        self._ctlbtn_pin,
+        long_duration_ms=settings.button_long_press_secs * 1000)
     # Initialize I2S audio out
     if settings.audio_enabled:
       print(f'Initializing audio')
@@ -172,6 +174,13 @@ class App:
         self.tof = adafruit_vl53l0x.VL53L0X(self.i2c)
         # Optimizing sensor performance parameters
         self.tof.measurement_timing_budget = 33000  # High-speed low-latency sampling (33ms)
+        self.paramsmap[PARAMID_TOF_THRESHOLD] = ConfigParam(
+          id=PARAMID_TOF_THRESHOLD,
+          name='tof_threshold',
+          title='TOF Threshold',
+          choices=range(16),
+          selected=settings.tof_threshold % 16)
+        self.params.append(self.paramsmap[PARAMID_TOF_THRESHOLD])
       except Exception as e:
         print(f'Failed to initialize TOF sensor: {e!r}')
       else:
@@ -256,6 +265,13 @@ class App:
       return self.paramsmap[PARAMID_DEFAULT_WAVEFORM].selected
     except KeyError:
       pass
+
+  @property
+  def tof_threshold_mm(self) -> int:
+    try:
+      return self.paramsmap[PARAMID_TOF_THRESHOLD].value * settings.tof_threshold_scale
+    except KeyError:
+      return settings.tof_threshold * settings.tof_threshold_scale
 
   def loop(self) -> None:
     if self.audio:
@@ -375,23 +391,24 @@ class App:
       self.handle_ctlbtn_short_press(self.ctlbtn.short_count)
 
   def run_tof(self) -> None:
-    distance = self.tof.range
-    if distance >= settings.tof_threshold_mm:
+    distance = max(0, self.tof.range + settings.tof_offset_mm)
+    if distance >= self.tof_threshold_mm:
       self.tof_armed = True
       self.tof_trigger_start = None
       return
     if not self.tof_armed:
       return
     current_time = ticks_ms()
+    debounce = settings.tof_debounce_secs * 1000
     # Debounce
     if self.tof_trigger_start is None:
       self.tof_trigger_start = current_time
-    if ticks_diff(current_time, self.tof_trigger_start) < settings.tof_debounce_secs * 1000:
+    if ticks_diff(current_time, self.tof_trigger_start) < debounce:
       return
     # Cooldown
     if (
       self.last_tof_trigger_at is not None and
-      ticks_diff(current_time, self.last_tof_trigger_at) < settings.tof_cooldown_secs * 1000):
+      ticks_diff(current_time, self.last_tof_trigger_at) < debounce):
       return
     print(f'Motion Detected! Target Range: {distance}mm')
     self.last_tof_trigger_at = current_time
@@ -649,6 +666,12 @@ class App:
 
   def after_umount(self) -> None:
     self.wav_files = None
+
+  def make_buttonio(self, pin: str|Pin) -> digitalio.DigitalInOut:
+      io = digitalio.DigitalInOut(as_pin(pin))
+      io.direction = digitalio.Direction.INPUT
+      io.pull = digitalio.Pull.UP
+      return io
 
 app = App()
 
