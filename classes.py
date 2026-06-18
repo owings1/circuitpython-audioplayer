@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import busio
+from adafruit_ticks import ticks_ms, ticks_diff, ticks_add
 from microcontroller import Pin
 
 try:
@@ -13,7 +14,7 @@ except ImportError:
 
 from utils import as_pin
 
-__all__ = ('ConfigParam', 'OledDisplay', 'SDHelper')
+__all__ = ('ConfigParam', 'OledDisplay', 'SDHelper', 'Thermostat')
 
 class ConfigParam:
   def __init__(
@@ -210,3 +211,155 @@ class SDHelper:
     self.sdcard = None
     if self.after_umount:
       self.after_umount()
+
+class Thermostat:
+  def __init__(
+    self,
+    i2c: busio.I2C,
+    *,
+    address: int|None = None,
+    heater_delay_secs: float = 30.0,
+    heater_cooldown_secs: float = 5.0,
+  ) -> None:
+    import i2cio
+    self.io = i2cio.I2CIO(i2c, address=address, num_analog=1, num_floats=1)
+    self.heater_relay = False
+    self.fan_relay = False
+    self.heater_has_run = False
+    self.heater_last_on_at = ticks_ms()
+    self.heater_delay_secs = heater_delay_secs
+    self.heater_cooldown_secs = heater_cooldown_secs
+    self.io.update()
+    self.print_state()
+
+  @property
+  def desired(self) -> int:
+    return int((self.io.analog(0) / 1024) * 40) + 50
+
+  @property
+  def heat_switch(self) -> bool:
+    return self.io.digital_read(0)
+
+  @property
+  def heater_relay(self) -> bool:
+    return self.io.digital_outstate(0)
+
+  @heater_relay.setter
+  def heater_relay(self, value: bool) -> None:
+    self.io.digital_write(0, bool(value))
+
+  @property
+  def fan_switch(self) -> bool:
+    return self.io.digital_read(1)
+
+  @property
+  def fan_relay(self) -> bool:
+    return self.io.digital_outstate(1)
+
+  @fan_relay.setter
+  def fan_relay(self, value: bool) -> None:
+    self.io.digital_write(1, bool(value))
+
+  @property
+  def temperature(self) -> int:
+    tempc = self.io.read_float(0)
+    return round(tempc * 9/5 + 32)
+
+  def update(self) -> None:
+    desired = self.desired
+    self.io.update()
+    change = self._enforce_heater()
+    change = self._enforce_fan() or change
+    if change:
+      self.io.update()
+      self.print_state()
+    else:
+      if desired != self.desired:
+        print(f'Desired change: {self.desired}')
+
+  def _enforce_heater(self) -> bool:
+    nowms = ticks_ms()
+    change = False
+    if self.heat_switch:
+      # Heat switch is turned on
+      if self.heater_relay:
+        # Heater is running
+        if self.temperature >= self.desired or self.temperature <= -127:
+          # Desired temperature is reached (or bad temperature reading)
+          print(f'Turning heater OFF {self.temperature=} {self.desired=}')
+          self.heater_relay = False
+          change = True
+      else:
+        # Heater is not running
+        if self.desired > self.temperature and self.temperature > -127:
+          # Desired temperature is not reached
+          # Check delay
+          heater_on_at = ticks_add(
+            self.heater_last_on_at,
+            int(self.heater_delay_secs * 1000))
+          if ticks_diff(heater_on_at, nowms) < 0:
+            print(f'Turning heater ON {self.temperature=} {self.desired=}')
+            self.heater_relay = True
+            change = True
+    else:
+      # Heat switch is turned off
+      if self.heater_relay:
+        print(f'Turning heater OFF (switch)')
+        self.heater_relay = False
+        change = True
+    if self.heater_relay:
+      # Update heater running state
+      self.heater_last_on_at = nowms
+      self.heater_has_run = True
+    return change
+
+  def _enforce_fan(self) -> bool:
+    nowms = ticks_ms()
+    change = False
+    # Determine fan state
+    if self.fan_switch:
+      # Fan switch is on, or heater is running
+      if not self.fan_relay:
+        print(f'Turning fan ON (switch)')
+        self.fan_relay = True
+        change = True
+    elif self.heater_relay:
+      # heater is running
+      if not self.fan_relay:
+        print(f'Turning fan ON (heater)')
+        self.fan_relay = True
+        change = True
+    elif self.fan_relay:
+      # Fan is running but switch is off, and heater is not running
+      if self.heater_has_run:
+        # Check cooldown
+        fan_off_at = ticks_add(
+          self.heater_last_on_at,
+          int(self.heater_cooldown_secs * 1000))
+        if ticks_diff(fan_off_at, nowms) < 0:
+          print(f'Turning fan OFF')
+          self.fan_relay = False
+          change = True
+      else:
+        print(f'Turning fan OFF')
+        self.fan_relay = False
+        change = True
+    return change
+
+  def deinit(self) -> None:
+    self.heater_relay = False
+    self.fan_relay = False
+    try:
+      self.io.update()
+    except Exception as e:
+      print(f'Failed to deinit tstat: {e!r}')
+
+  def print_state(self) -> None:
+    print(
+      f'Thermostat state:\n'
+      f'  temperature={self.temperature}\n'
+      f'  desired={self.desired}\n'
+      f'  heat_switch={+self.heat_switch}\n'
+      f'  fan_switch={+self.fan_switch}\n'
+      f'  heater_relay={+self.heater_relay}\n'
+      f'  fan_relay={+self.fan_relay}')

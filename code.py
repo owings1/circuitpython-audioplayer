@@ -57,6 +57,7 @@ class App:
   last_tof_trigger_at: int|None = None
   tof_armed: bool = True
   tof_trigger_start: int|None = None
+  tstat: Thermostat|None = None
   _fp = None
   _wave = None
   _sample = None
@@ -185,6 +186,18 @@ class App:
         print(f'Failed to initialize TOF sensor: {e!r}')
       else:
         print(f'Initialized TOF sensor')
+    if settings.tstat_enabled:
+      print(f'Initializing tstat')
+      try:
+        self.i2c = self.i2c or board.I2C()
+        self.tstat = Thermostat(
+          self.i2c,
+          address=settings.tstat_address,
+          heater_delay_secs=settings.tstat_heater_delay_secs,
+          heater_cooldown_secs=settings.tstat_heater_cooldown_secs)
+      except Exception as e:
+        print(f'Failed to initialize tstat: {e!r}')
+      
     if settings.sd_enabled:
       print(f'Initializing SD')
       self.spi = self.spi or board.SPI()
@@ -226,6 +239,8 @@ class App:
     if settings.oled_enabled:
       import displayio
       displayio.release_displays()
+    if self.tstat:
+      self.tstat.deinit()
     self.i2c = None
     self.spi = None
     self.enow = None
@@ -252,6 +267,7 @@ class App:
     self.last_tof_trigger_at = None
     self.tof_armed = True
     self.tof_trigger_start = None
+    self.tstat = None
     self._wave = None
     self._fp = None
     self._sample = None
@@ -284,6 +300,8 @@ class App:
       self.run_button()
     if self.tof:
       self.run_tof()
+    if self.tstat:
+      self.run_tstat()
 
   def execute(self, cmdbuf: bytes) -> None:
     if not cmdbuf:
@@ -414,6 +432,9 @@ class App:
     self.last_tof_trigger_at = current_time
     self.tof_armed = False
     self.handle_tof_trigger()
+
+  def run_tstat(self) -> None:
+    self.tstat.update()
 
   def handle_tof_trigger(self) -> None:
     self.send_or_execute(settings.tof_payload, settings.tof_peer)

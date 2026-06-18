@@ -63,3 +63,8 @@ tof_threshold_scale = 100
 tof_offset_mm = 0
 tof_cooldown_secs = 2.5
 tof_debounce_secs = 0.05
+
+tstat_enabled = False
+tstat_address = None
+tstat_heater_delay_secs = 30
+tstat_heater_cooldown_secs = 5

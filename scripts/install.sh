@@ -18,6 +18,7 @@ install-recvr() {
     defaults.py
     samples.py
     utils.py
+    i2cio.py
   )
   for file in "${files[@]}"; do
     copy-update "$file" "$dest/$file"
