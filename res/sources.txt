@@ -1,0 +1,8 @@
+pcm5102a:
+https://forum.fritzing.org/t/cheap-pcm5102a-dac/26130
+
+jst xh:
+https://forum.fritzing.org/t/jst-xh-connector-2-3-and-4-pin/33419
+
+VL53L0X TOF sensor:
+https://forum.fritzing.org/t/vl53l0x-fz-file/8951/15

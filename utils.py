@@ -28,7 +28,32 @@ def couples(it: Iterable[T]) -> Generator[tuple[T, T]]:
     except StopIteration:
       break
     yield a, b
-    
+
+class SmoothedInt:
+  def __init__(self, *, alpha: float = 1.0, threshold: int = 1, initial: int = 0) -> None:
+    self.alpha = alpha
+    self.threshold = threshold
+    self.smoothed_value = float(initial)
+    self.final_locked_value = int(initial)
+
+  def observe(self, raw: int) -> int:
+    self.smoothed_value = (self.alpha * raw) + ((1.0 - self.alpha) * self.smoothed_value)
+    if (abs(round(self.smoothed_value) - self.final_locked_value) > self.threshold):
+      self.final_locked_value = round(self.smoothed_value)
+    return self.final_locked_value
+
+class SmoothedAnalog:
+  def __init__(self, pin: str|Pin, **kw) -> None:
+    from analogio import AnalogIn
+    self.io = AnalogIn(as_pin(pin))
+    self.sm = SmoothedInt(**kw)
+
+  def read(self) -> int:
+    return self.sm.observe(self.io.value)
+
+  def deinit(self) -> None:
+    self.io.deinit()
+
 def init_settings(defaults: MT, settings: ModuleType) -> MT:
   for name in defaults.__dict__:
     if not hasattr(settings, name):

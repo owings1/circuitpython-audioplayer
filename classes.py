@@ -2,19 +2,26 @@ from __future__ import annotations
 
 import busio
 from adafruit_ticks import ticks_ms, ticks_diff, ticks_add
+from digitalio import DigitalInOut, Direction, Pull
 from microcontroller import Pin
+from micropython import const
 
 try:
-  from typing import Any, Callable, Sequence
+  from typing import Any, Callable, Sequence, TYPE_CHECKING
   from adafruit_display_text.label import Label
   from busdisplay import BusDisplay
   from i2cdisplaybus import I2CDisplayBus
+  from abc import abstractmethod
 except ImportError:
+  TYPE_CHECKING = False
   pass
 
 from utils import as_pin
 
-__all__ = ('ConfigParam', 'OledDisplay', 'SDHelper', 'Thermostat')
+__all__ = ('ConfigParam', 'OledDisplay', 'SDHelper', 'ThermostatI2C', 'ThermostatLocal')
+
+if TYPE_CHECKING:
+  __all__ += ('BaseThermostat',)
 
 class ConfigParam:
   def __init__(
@@ -212,66 +219,81 @@ class SDHelper:
     if self.after_umount:
       self.after_umount()
 
-class Thermostat:
+  def deinit(self) -> None:
+    self.close()
+
+class BaseThermostat:
   def __init__(
     self,
-    i2c: busio.I2C,
     *,
-    address: int|None = None,
     heater_delay_secs: float = 30.0,
     heater_cooldown_secs: float = 5.0,
   ) -> None:
-    import i2cio
-    self.io = i2cio.I2CIO(i2c, address=address, num_analog=1, num_floats=1)
     self.heater_relay = False
     self.fan_relay = False
     self.heater_has_run = False
     self.heater_last_on_at = ticks_ms()
     self.heater_delay_secs = heater_delay_secs
     self.heater_cooldown_secs = heater_cooldown_secs
-    self.io.update()
+    self._syncio()
     self.print_state()
+
+  if TYPE_CHECKING:
+    _analog_resolution: int
+
+    @abstractmethod
+    def temperature_c(self) -> float: ...
+
+    @abstractmethod
+    def digital_read(self, i: int) -> bool: ...
+
+    @abstractmethod
+    def digital_write(self, i: int, value: bool) -> None: ...
+
+    @abstractmethod
+    def digital_outstate(self, i: int) -> bool: ...
+
+    @abstractmethod
+    def analog_read(self, i: int) -> int: ...
 
   @property
   def desired(self) -> int:
-    return int((self.io.analog(0) / 1024) * 40) + 50
+    return int((self.analog_read(0) / (self._analog_resolution - 1)) * 40) + 50
 
   @property
   def heat_switch(self) -> bool:
-    return self.io.digital_read(0)
+    return self.digital_read(0)
 
   @property
   def heater_relay(self) -> bool:
-    return self.io.digital_outstate(0)
+    return self.digital_outstate(0)
 
   @heater_relay.setter
   def heater_relay(self, value: bool) -> None:
-    self.io.digital_write(0, bool(value))
+    self.digital_write(0, bool(value))
 
   @property
   def fan_switch(self) -> bool:
-    return self.io.digital_read(1)
+    return self.digital_read(1)
 
   @property
   def fan_relay(self) -> bool:
-    return self.io.digital_outstate(1)
+    return self.digital_outstate(1)
 
   @fan_relay.setter
   def fan_relay(self, value: bool) -> None:
-    self.io.digital_write(1, bool(value))
+    self.digital_write(1, bool(value))
 
   @property
   def temperature(self) -> int:
-    tempc = self.io.read_float(0)
-    return round(tempc * 9/5 + 32)
+    return round(self.temperature_c() * 9/5 + 32)
 
   def update(self) -> None:
     desired = self.desired
-    self.io.update()
-    change = self._enforce_heater()
-    change = self._enforce_fan() or change
+    self._syncio()
+    change = self._enforce_heater() | self._enforce_fan()
     if change:
-      self.io.update()
+      self._syncio()
       self.print_state()
     else:
       if desired != self.desired:
@@ -346,11 +368,14 @@ class Thermostat:
         change = True
     return change
 
+  def _syncio(self) -> None:
+    pass
+
   def deinit(self) -> None:
-    self.heater_relay = False
-    self.fan_relay = False
     try:
-      self.io.update()
+      self.heater_relay = False
+      self.fan_relay = False
+      self._syncio()
     except Exception as e:
       print(f'Failed to deinit tstat: {e!r}')
 
@@ -363,3 +388,103 @@ class Thermostat:
       f'  fan_switch={+self.fan_switch}\n'
       f'  heater_relay={+self.heater_relay}\n'
       f'  fan_relay={+self.fan_relay}')
+
+class ThermostatI2C(BaseThermostat):
+  def __init__(
+    self,
+    i2c: busio.I2C,
+    *,
+    address: int|None = None,
+    **kw
+  ) -> None:
+    import i2cio
+    self.io = i2cio.I2CIO(i2c, address=address, num_analog=1, num_floats=1)
+    self._analog_resolution = 0x400
+    super().__init__(**kw)
+
+  def temperature_c(self) -> float:
+    return self.io.read_float(0)
+
+  def digital_read(self, i: int) -> bool:
+    return self.io.digital_read(i)
+
+  def digital_write(self, i: int, value: bool) -> None:
+    self.io.digital_write(i, value)
+
+  def digital_outstate(self, i: int) -> bool:
+    return self.io.digital_outstate(i)
+
+  def analog_read(self, i: int) -> int:
+    return self.io.analog_read(i)
+
+  def _syncio(self) -> None:
+    self.io.update()
+
+class ThermostatLocal(BaseThermostat):
+  def __init__(
+    self,
+    *,
+    pin_desired: str|Pin,
+    pin_heater_relay: str|Pin,
+    pin_fan_relay: str|Pin,
+    pin_heat_switch: str|Pin,
+    pin_fan_switch: str|Pin,
+    pin_onewire_bus: str|Pin,
+    **kw
+  ) -> None:
+    from adafruit_onewire.bus import OneWireBus
+    from adafruit_ds18x20 import DS18X20
+    from utils import SmoothedAnalog
+    self._analog_resolution = 0x10000
+    self._analogs = self._digital_ins = self._digital_outs = self._owbus = None
+    try:
+      self._analogs = (
+        SmoothedAnalog(pin_desired, alpha=0.2, threshold=0x100),)
+      self._digital_ins = (
+        DigitalInOut(as_pin(pin_heat_switch)),
+        DigitalInOut(as_pin(pin_fan_switch)))
+      for io in self._digital_ins:
+        io.direction = Direction.INPUT
+        io.pull = Pull.UP
+      self._digital_outs = (
+        DigitalInOut(as_pin(pin_heater_relay)),
+        DigitalInOut(as_pin(pin_fan_relay)))
+      for io in self._digital_outs:
+        io.direction = Direction.OUTPUT
+      self._owbus = OneWireBus(as_pin(pin_onewire_bus))
+      self._tempsensor = DS18X20(self._owbus, self._owbus.scan()[0])
+      super().__init__(**kw)
+    except:
+      self.deinit()
+      raise
+
+  def digital_read(self, i: int) -> bool:
+    io = self._digital_ins[i]
+    value = io.value
+    if io.pull is Pull.UP:
+      value = not value
+    return value
+
+  def digital_write(self, i: int, value: bool) -> None:
+    self._digital_outs[i].value = bool(value)
+
+  def digital_outstate(self, i: int) -> bool:
+    return self._digital_outs[i].value
+
+  def analog_read(self, i: int) -> int:
+    return self._analogs[i].read()
+
+  def temperature_c(self) -> float:
+    return self._tempsensor.temperature
+
+  def deinit(self) -> None:
+    super().deinit()
+    for ios in (self._analogs, self._digital_ins, self._digital_outs):
+      if ios:
+        for io in ios:
+          io.deinit()
+    self._analogs = self._digital_ins = self._digital_outs = None
+    if self._owbus:
+      self._owbus._ow.deinit()
+      self._owbus = None
+    self._tempsensor = None

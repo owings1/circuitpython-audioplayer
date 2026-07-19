@@ -43,7 +43,7 @@ class I2CIO:
     digital_mask = struct.unpack_from(b'<H', self.buf, 0)[0]
     return bool(digital_mask & (1 << i))
 
-  def analog(self, i: int) -> int:
+  def analog_read(self, i: int) -> int:
     if not 0 <= i < self.num_analog:
       raise IndexError('Analog channel index out of initialized bounds')
     offset = 2 + (i * 2)

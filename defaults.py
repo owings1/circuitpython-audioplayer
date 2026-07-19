@@ -1,26 +1,26 @@
-esp_enabled = True
+esp_enabled = False
 esp_channel = 6
 esp_peers = []
 
-audio_enabled = True
+audio_enabled = False
 audio_pin_bclk = 'D0'
 audio_pin_lrc = 'D1'
 audio_pin_din = 'D2'
 
-button_enabled = True
+button_enabled = False
 button_pin = 'D7'
 button_long_press_secs = 1
 button_payload = b'\x05'
 button_peer = None
 
-ctlbtn_enabled = True
+ctlbtn_enabled = False
 ctlbtn_pin = 'D6'
 
-sd_enabled = True
+sd_enabled = False
 sd_pin_cs = 'D3'
 sd_path = '/sd'
 
-oled_enabled = True
+oled_enabled = False
 oled_driver = 'SSD1306'
 oled_address = 0x3c
 oled_width = 128
@@ -28,7 +28,7 @@ oled_height = 64
 oled_line_spacing = 4
 oled_x_offset = 0
 
-synth_enabled = True
+synth_enabled = False
 synth_volume = 9
 synth_attack_time = 0.02
 synth_decay_time = 0.0
@@ -52,7 +52,7 @@ prefab_tunes = [
   ),
 ]
 
-loop_delay_secs = 0.001
+loop_delay_secs = 0.0
 idle_secs = 10
 
 tof_enabled = False
@@ -65,6 +65,16 @@ tof_cooldown_secs = 2.5
 tof_debounce_secs = 0.05
 
 tstat_enabled = False
+tstat_i2c = True
 tstat_address = None
 tstat_heater_delay_secs = 30
 tstat_heater_cooldown_secs = 5
+tstat_desired_scale_coeff = 40
+tstat_desired_scale_offset = 50
+# For local (non-I2C) mode only
+tstat_local_pin_desired = 'A0'
+tstat_local_pin_heater_relay = 'D2'
+tstat_local_pin_fan_relay = 'D6'
+tstat_local_pin_heat_switch = 'D7'
+tstat_local_pin_fan_switch = 'D8'
+tstat_local_pin_onewire_bus = 'D3'
