@@ -8,10 +8,10 @@ dest="$(realpath "$1")"
 cd "$(dirname "$0")/.."
 
 main() {
-  install-recvr
+  install-app
 }
 
-install-recvr() {
+install-app() {
   local files=(
     classes.py
     code.py
@@ -26,9 +26,6 @@ install-recvr() {
   cp -X -v -n \
     settings.py \
     "$dest" || true
-  # cp -X -v -n -r \
-  #   lib/* \
-  #   "$dest/lib/" || true
 }
 
 copy-update() {
