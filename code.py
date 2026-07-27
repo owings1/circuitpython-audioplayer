@@ -703,13 +703,16 @@ class App:
       return
 
   def sd_after_mount(self) -> None:
-    self.audio_reload_wav_files()
+    if self.audio:
+      self.audio_reload_wav_files()
 
   def sd_before_umount(self) -> None:
-    self.run_audio()
+    if self.audio:
+      self.run_audio()
 
   def sd_after_umount(self) -> None:
-    self.audio_wav_files = None
+    if self.audio:
+      self.audio_wav_files = None
 
   def make_buttonio(self, pin: str|Pin) -> digitalio.DigitalInOut:
     io = digitalio.DigitalInOut(as_pin(pin))
